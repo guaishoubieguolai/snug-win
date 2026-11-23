@@ -76,16 +76,27 @@ public sealed class DisplayArrivalAndRetirementTests
     [Fact]
     public async Task Reshape_ReusingSameContainerId_SucceedsViaExpectedContainer()
     {
-        var rig = new DisplayOwnershipFixture();
-        var monitor = new CherryMonitor(0, Guid.NewGuid());
-        rig.Arrive = _ => rig.Present.Add(monitor);
-        var svc = rig.Service();
-        uint id = await svc.CreateAsync(ScreenFit.Standard);
-        Assert.Equal(0u, id);
+        string dir = Path.Combine(Path.GetTempPath(), "snug-reshape-same-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var paths = new SnugWin.Core.Persistence.SnugPaths(dir);
+            var rig = new DisplayOwnershipFixture();
+            var monitor = new CherryMonitor(0, Guid.NewGuid());
+            rig.Arrive = _ => rig.Present.Add(monitor);
+            var svc = rig.Service(paths);
+            uint id = await svc.CreateAsync(ScreenFit.Standard);
+            Assert.Equal(0u, id);
 
-        var newFit = new ScreenFit(2);
-        Assert.True(await svc.ReshapeAsync(id, newFit));
-        Assert.Equal(newFit, svc.FitOf(id));
+            var newFit = new ScreenFit(2);
+            Assert.True(await svc.ReshapeAsync(id, newFit));
+            Assert.Equal(newFit, svc.FitOf(id));
+            Assert.Equal([monitor], new DisplayOwnership(paths.OwnedDisplaysFile).All());
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
     }
 
     [Theory]

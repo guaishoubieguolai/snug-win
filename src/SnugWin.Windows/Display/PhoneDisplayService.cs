@@ -189,7 +189,7 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
         return (latest, connectionId);
     }
 
-    private async Task CompleteArrivalAsync(VddMonitor monitor, ScreenFit fit, CherryInventory before,
+    private async Task<CherryMonitor> CompleteArrivalAsync(VddMonitor monitor, ScreenFit fit, CherryInventory before,
         IReadOnlyList<(uint StableId, bool IsPrimary)> baselineNonCherry, CancellationToken ct, Guid? expectedContainer = null)
     {
         CherryMonitor? proof = null;
@@ -206,6 +206,7 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
             ct.ThrowIfCancellationRequested();
             _ready[monitor.Id] = new(proof, fit, monitor.Name!);
             Log.Info($"Cherry 手机屏 #{monitor.Id} 已按 EDID 确认并切到 {fit}");
+            return proof;
         }
         catch
         {
@@ -272,24 +273,15 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
         bool attempted = false;
         MonitorSnapshot? Observe()
         {
+            EnsureNonCherryIntact(baselineNonCherry);
             var online = _topology.Online(target, attachedName);
-            if (online is not null)
-            {
-                EnsureNonCherryIntact(baselineNonCherry);
-                return online;
-            }
+            if (online is not null) return online;
             if (attachedName is not null) return null;
             if (attempted && sinceAttempt.ElapsedMilliseconds < 1500) return null;
             attempted = true;
             sinceAttempt.Restart();
             attachedName = _topology.Attach(target, w, h);
-            var immediate = attachedName is null ? null : _topology.Online(target, attachedName);
-            if (immediate is not null)
-            {
-                EnsureNonCherryIntact(baselineNonCherry);
-                return immediate;
-            }
-            return null;
+            return attachedName is null ? null : _topology.Online(target, attachedName);
         }
         await ThrottleModesetAsync(ct).ConfigureAwait(false);
         if (await PollAsync(Observe, _timeout, ct).ConfigureAwait(false) is null)
@@ -334,8 +326,9 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
         try
         {
             await SubmitAsync(monitor, state, connectionId, replace: true, ct).ConfigureAwait(false);
-            await CompleteArrivalAsync(monitor, fit, before, baselineNonCherry, ct, old.Target.ContainerId).ConfigureAwait(false);
-            _ownership.Release(old.Target);
+            var next = await CompleteArrivalAsync(monitor, fit, before, baselineNonCherry, ct, old.Target.ContainerId).ConfigureAwait(false);
+            if (next != old.Target)
+                _ownership.Release(old.Target);
         }
         catch
         {

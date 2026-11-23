@@ -113,14 +113,14 @@ public sealed class PhoneDesk
     private bool _settling;
     private Placement? _placement;
     private int _recheckGeneration;
-    private Task? _pendingRecheckTask;
+    private volatile Task? _pendingRecheckTask;
     private double? _offlineSince;
     private double _offlineRetryAt;
     private int _offlineAttempts;
     private bool _offlineRebuildUsed;
     private bool _recoveringDisplay;
     private CancellationTokenSource? _pendingRetryCts;
-    private Task? _pendingRetryTask;
+    private volatile Task? _pendingRetryTask;
     private int _failures;
     private bool _circuitBreakerTripped;
     private bool _verifying;
@@ -776,9 +776,11 @@ public sealed class PhoneDesk
 
     private void ScheduleRetry()
     {
-        CancelRetry(resetFailures: false);
+        _pendingRetryCts?.Cancel();
+        _pendingRetryCts = null;
         if (_failures >= RetryDelays.Length)
         {
+            _pendingRetryTask = null;
             _circuitBreakerTripped = true;
             Log.Error($"加手机屏连续失败 {_failures + 1} 次，已触发安全熔断保护，停止自动重试以防屏幕闪烁");
             State = State with
