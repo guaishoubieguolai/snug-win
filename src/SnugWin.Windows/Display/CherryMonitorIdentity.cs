@@ -72,7 +72,6 @@ internal static class CherryMonitorIdentity
         {
             using var key = model.OpenSubKey(instance);
             if (key is not null) container = ContainerOf(key);
-            if (container != Guid.Empty) inventory.KnownContainers.Add(container); // include phantom nodes
             if (IsPresentOnCherryAdapter(Model + instance))
                 inventory.ObservePresent(key is null ? null : DriverIdOf(key), container);
         }
@@ -133,8 +132,13 @@ internal static class CherryMonitorIdentity
         if (Win32.CM_Get_Device_IDW(parent, id, (uint)id.Capacity, 0) != 0)
             throw new IOException("无法读取显示适配器实例 ID");
         using var adapter = Registry.LocalMachine.OpenSubKey(EnumKey + id);
-        if (adapter?.GetValue("HardwareID") is not string[] hardwareIds)
-            throw new IOException("无法读取显示适配器硬件 ID");
+        var rawHardwareId = adapter?.GetValue("HardwareID");
+        string[] hardwareIds = rawHardwareId switch
+        {
+            string[] array => array,
+            string single => [single],
+            _ => throw new IOException("无法读取显示适配器硬件 ID")
+        };
         return hardwareIds.Contains(AdapterHardwareId, StringComparer.OrdinalIgnoreCase);
     }
 }

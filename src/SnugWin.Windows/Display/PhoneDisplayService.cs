@@ -92,6 +92,19 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
             .Select(m => (m.StableId, m.IsPrimary))
             .ToArray();
 
+    private static readonly TimeSpan MinModesetInterval = TimeSpan.FromSeconds(2.0);
+    private DateTimeOffset _lastModesetAt = DateTimeOffset.MinValue;
+
+    private async Task ThrottleModesetAsync(CancellationToken ct)
+    {
+        var elapsed = DateTimeOffset.Now - _lastModesetAt;
+        if (elapsed < MinModesetInterval)
+        {
+            await Task.Delay(MinModesetInterval - elapsed, ct).ConfigureAwait(false);
+        }
+        _lastModesetAt = DateTimeOffset.Now;
+    }
+
     private void EnsureNonCherryIntact(IReadOnlyList<(uint StableId, bool IsPrimary)> baseline)
     {
         if (baseline.Count == 0) return;
@@ -177,12 +190,12 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
     }
 
     private async Task CompleteArrivalAsync(VddMonitor monitor, ScreenFit fit, CherryInventory before,
-        IReadOnlyList<(uint StableId, bool IsPrimary)> baselineNonCherry, CancellationToken ct)
+        IReadOnlyList<(uint StableId, bool IsPrimary)> baselineNonCherry, CancellationToken ct, Guid? expectedContainer = null)
     {
         CherryMonitor? proof = null;
         try
         {
-            proof = await FindArrivalAsync(monitor, before, _timeout, ct).ConfigureAwait(false)
+            proof = await FindArrivalAsync(monitor, before, _timeout, ct, expectedContainer).ConfigureAwait(false)
                 ?? throw new PhoneScreenException(PhoneScreenErrorKind.NeverOnline);
             _unconfirmed.Remove(proof.DriverId);
             _ownership.Record(proof);
@@ -196,33 +209,48 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
         }
         catch
         {
-            await RollbackArrivalAsync(proof, monitor, before).ConfigureAwait(false);
+            await RollbackArrivalAsync(proof, monitor, before, expectedContainer).ConfigureAwait(false);
             throw;
         }
     }
 
-    private async Task<CherryMonitor?> FindArrivalAsync(VddMonitor monitor, CherryInventory before, TimeSpan timeout, CancellationToken ct)
+    private async Task<CherryMonitor?> FindArrivalAsync(VddMonitor monitor, CherryInventory before, TimeSpan timeout, CancellationToken ct, Guid? expectedContainer = null)
     {
         CherryMonitor? FreshTarget()
         {
             var current = _topology.Inspect().Unique(monitor.Id);
-            return current is not null && !before.KnownContainers.Contains(current.ContainerId) ? current : null;
+            if (current is null) return null;
+            if (expectedContainer.HasValue && current.ContainerId == expectedContainer.Value) return current;
+            return !before.KnownContainers.Contains(current.ContainerId) ? current : null;
         }
         var target = await PollAsync(FreshTarget, timeout, ct).ConfigureAwait(false);
         if (target is null || _ipc.IsLegacyProtocol) return target;
-        var state = await DriverStateAsync(ct).ConfigureAwait(false);
-        if (state is null) return null;
-        var actual = state.Where(m => m.Id == monitor.Id).ToArray();
-        return VirtualDisplayIpcClient.SerializeNotify(actual) == VirtualDisplayIpcClient.SerializeNotify([monitor]) ? target : null;
+
+        var expectedJson = VirtualDisplayIpcClient.SerializeNotify([monitor]);
+        var timer = Stopwatch.StartNew();
+        while (timer.Elapsed < timeout)
+        {
+            ct.ThrowIfCancellationRequested();
+            var state = await DriverStateAsync(ct).ConfigureAwait(false);
+            if (state is not null)
+            {
+                var actual = state.Where(m => m.Id == monitor.Id).ToArray();
+                if (VirtualDisplayIpcClient.SerializeNotify(actual) == expectedJson) return target;
+            }
+            var remaining = timeout - timer.Elapsed;
+            if (remaining <= TimeSpan.Zero) break;
+            await Task.Delay(remaining.TotalMilliseconds < 50 ? remaining : TimeSpan.FromMilliseconds(50), ct).ConfigureAwait(false);
+        }
+        return null;
     }
 
-    private async Task RollbackArrivalAsync(CherryMonitor? proof, VddMonitor monitor, CherryInventory before)
+    private async Task RollbackArrivalAsync(CherryMonitor? proof, VddMonitor monitor, CherryInventory before, Guid? expectedContainer = null)
     {
         try
         {
             // Cancellation can win just after the write, before PnP delivers the arrival.
             var grace = TimeSpan.FromMilliseconds(Math.Min(1000, _timeout.TotalMilliseconds));
-            proof ??= await FindArrivalAsync(monitor, before, grace, CancellationToken.None).ConfigureAwait(false);
+            proof ??= await FindArrivalAsync(monitor, before, grace, CancellationToken.None, expectedContainer).ConfigureAwait(false);
             if (proof is null) return; // a successful pipe write alone is not ownership
             _unconfirmed.Remove(proof.DriverId);
             _ownership.Record(proof);
@@ -244,17 +272,31 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
         bool attempted = false;
         MonitorSnapshot? Observe()
         {
-            EnsureNonCherryIntact(baselineNonCherry);
             var online = _topology.Online(target, attachedName);
-            if (online is not null || attachedName is not null) return online;
-            if (attempted && sinceAttempt.ElapsedMilliseconds < 500) return null;
+            if (online is not null)
+            {
+                EnsureNonCherryIntact(baselineNonCherry);
+                return online;
+            }
+            if (attachedName is not null) return null;
+            if (attempted && sinceAttempt.ElapsedMilliseconds < 1500) return null;
             attempted = true;
             sinceAttempt.Restart();
             attachedName = _topology.Attach(target, w, h);
-            return attachedName is null ? null : _topology.Online(target, attachedName);
+            var immediate = attachedName is null ? null : _topology.Online(target, attachedName);
+            if (immediate is not null)
+            {
+                EnsureNonCherryIntact(baselineNonCherry);
+                return immediate;
+            }
+            return null;
         }
+        await ThrottleModesetAsync(ct).ConfigureAwait(false);
         if (await PollAsync(Observe, _timeout, ct).ConfigureAwait(false) is null)
+        {
+            EnsureNonCherryIntact(baselineNonCherry);
             throw new PhoneScreenException(PhoneScreenErrorKind.NeverOnline);
+        }
     }
 
     public async Task<bool> ReshapeAsync(uint displayId, ScreenFit fit, CancellationToken ct = default)
@@ -292,7 +334,7 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
         try
         {
             await SubmitAsync(monitor, state, connectionId, replace: true, ct).ConfigureAwait(false);
-            await CompleteArrivalAsync(monitor, fit, before, baselineNonCherry, ct).ConfigureAwait(false);
+            await CompleteArrivalAsync(monitor, fit, before, baselineNonCherry, ct, old.Target.ContainerId).ConfigureAwait(false);
             _ownership.Release(old.Target);
         }
         catch

@@ -43,6 +43,7 @@ public abstract record DeskNotice
     public sealed record Reshaped : DeskNotice;
     public sealed record ReshapeFailed : DeskNotice;
     public sealed record ZoomLeftBehind(string App, int Steps) : DeskNotice;
+    public sealed record CircuitBreakerTripped : DeskNotice;
 }
 
 public abstract record DeskGone
@@ -121,6 +122,7 @@ public sealed class PhoneDesk
     private CancellationTokenSource? _pendingRetryCts;
     private Task? _pendingRetryTask;
     private int _failures;
+    private bool _circuitBreakerTripped;
     private bool _verifying;
     private bool _checkingReturns;
     private (int Pid, HashSet<WindowKey> Known, double Until)? _replaced;
@@ -187,12 +189,29 @@ public sealed class PhoneDesk
     {
         if (on == _wanted) return;
         _wanted = on;
+        _circuitBreakerTripped = false;
         if (!on)
         {
             CancelRetry();
             State = State with { Dismissed = false };
         }
+        else
+        {
+            _failures = 0;
+            if (State.ScreenPhase == PhoneScreenPhase.Failed)
+                State = State with { ScreenPhase = PhoneScreenPhase.Preparing, Notice = null };
+        }
         _ = _lane.Run(ReconcileAsync);
+    }
+
+    public void ResetCircuitBreaker()
+    {
+        _circuitBreakerTripped = false;
+        _failures = 0;
+        if (State.Notice is DeskNotice.CircuitBreakerTripped)
+            State = State with { Notice = null };
+        if (_wanted && !State.Dismissed && _display is null)
+            _ = _lane.Run(ReconcileAsync);
     }
 
     public void DismissScreen()
@@ -210,6 +229,8 @@ public sealed class PhoneDesk
     public void ReenterScreen()
     {
         if (!_wanted || !State.Dismissed) return;
+        _circuitBreakerTripped = false;
+        _failures = 0;
         State = State with { Dismissed = false, Notice = null };
         Log.Info("同会话重新进入手机屏：恢复建屏");
         _ = _lane.Run(ReconcileAsync);
@@ -466,13 +487,17 @@ public sealed class PhoneDesk
 
     public void DisplaysChanged()
     {
-        SettleDisplays();
-        if (_display is null && State.ScreenPhase != PhoneScreenPhase.Suspended) return;
+        if (_circuitBreakerTripped) return;
+        if (_display is not null)
+            SettleDisplays();
+        else if (State.ScreenPhase != PhoneScreenPhase.Suspended)
+            return;
+
         int gen = ++_recheckGeneration;
         _pendingRecheckTask = Task.Run(async () =>
         {
             await _timeline.SleepAsync(RecheckDelay);
-            if (gen != _recheckGeneration) return;
+            if (gen != _recheckGeneration || _circuitBreakerTripped) return;
             await _lane.Run(RecheckAsync);
         });
     }
@@ -520,6 +545,7 @@ public sealed class PhoneDesk
 
     public void SettleDisplays()
     {
+        if (_circuitBreakerTripped) return;
         if (_wanted && !State.Dismissed && !_recoveringDisplay)
         {
             bool retryCreate = _display is null
@@ -622,6 +648,7 @@ public sealed class PhoneDesk
 
     private async Task ReconcileAsync()
     {
+        if (_circuitBreakerTripped) return;
         if (!_wanted || State.Dismissed)
         {
             if (State.ScreenPhase != PhoneScreenPhase.Off) await RemoveScreenAsync();
@@ -752,7 +779,13 @@ public sealed class PhoneDesk
         CancelRetry(resetFailures: false);
         if (_failures >= RetryDelays.Length)
         {
-            Log.Error($"加手机屏连续失败 {_failures + 1} 次，这次远程不再重试");
+            _circuitBreakerTripped = true;
+            Log.Error($"加手机屏连续失败 {_failures + 1} 次，已触发安全熔断保护，停止自动重试以防屏幕闪烁");
+            State = State with
+            {
+                ScreenPhase = PhoneScreenPhase.Failed,
+                Notice = new DeskNotice.CircuitBreakerTripped()
+            };
             return;
         }
         double delay = RetryDelays[_failures++];
@@ -762,9 +795,9 @@ public sealed class PhoneDesk
         _pendingRetryTask = Task.Run(async () =>
         {
             await _timeline.SleepAsync(delay, cts.Token);
-            if (cts.IsCancellationRequested) return;
+            if (cts.IsCancellationRequested || _circuitBreakerTripped) return;
             // A reshape can invalidate the retry while it waits on the shared lane.
-            await _lane.Run(() => cts.IsCancellationRequested ? Task.CompletedTask : ReconcileAsync());
+            await _lane.Run(() => cts.IsCancellationRequested || _circuitBreakerTripped ? Task.CompletedTask : ReconcileAsync());
         });
     }
 
@@ -936,6 +969,7 @@ public sealed class PhoneDesk
 
     private async Task RecheckAsync()
     {
+        if (_circuitBreakerTripped) return;
         if (_wanted && !State.Dismissed)
         {
             if (_display is null && State.ScreenPhase == PhoneScreenPhase.Suspended)

@@ -64,9 +64,14 @@ public sealed class AppController : ILogSink
     private int _sampling;
     private readonly AppUpdateService _updater = new();
     private UpdateCheckResult? _latestUpdate;
+    private static readonly TimeSpan StartupGracePeriod = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan DisplaySettingsChangeDebounce = TimeSpan.FromSeconds(2);
+
     private ScreenshotOverlay? _lastSyncedOverlay;
     private bool _lastSyncedScreenshotSetting;
     private string _lastTouchRegionsSig = string.Empty;
+    private readonly DateTimeOffset _startedAt = DateTimeOffset.Now;
+    private DateTimeOffset _lastDisplayChangeHandled = DateTimeOffset.MinValue;
 
     public PhoneCatalog Catalog { get; }
     public AppIconCache Icons { get; } = new();
@@ -221,10 +226,18 @@ public sealed class AppController : ILogSink
                 BringCursorHome(includePersistentMain: true);
 
             bool remote = _session.InEpisode || _sensor.ManualOverride;
+            bool inStartupGrace = now - _startedAt < StartupGracePeriod;
+            if (inStartupGrace && !remote)
+            {
+                SyncTouchRegion();
+                NotifySummary();
+                return;
+            }
+
             bool wantsTouch = signals.ManualOverride
                               || ControllerClassifier.WantsPhoneScreen(_session.EpisodeControllers(now));
             _desks.SetWishes(ScreenPlan.ForController(ScreenPlan.Wishes(_config, remote), wantsTouch, remote));
-            _desks.SetRemote(_session.InEpisode);
+            _desks.SetRemote(remote);
 
             if ((now - _lastVerifyAt).TotalSeconds >= 2.0)
             {
@@ -347,6 +360,9 @@ public sealed class AppController : ILogSink
 
     private void OnDisplaySettingsChanged(object? sender, EventArgs e)
     {
+        var now = DateTimeOffset.Now;
+        if (now - _lastDisplayChangeHandled < DisplaySettingsChangeDebounce) return;
+        _lastDisplayChangeHandled = now;
         _dispatcher.BeginInvoke(() => _desks.DisplaysChanged());
     }
 
@@ -1033,6 +1049,7 @@ public sealed class AppController : ILogSink
     public void SetManualOverride(bool on)
     {
         _sensor.ManualOverride = on;
+        if (on) _desks.ResetCircuitBreaker();
         OnTick();
         UiStateChanged?.Invoke();
     }

@@ -45,6 +45,7 @@ public sealed class PhoneDeskTests : IDisposable
         public bool RejectReshape { get; set; }
         public bool DelayRetirement { get; set; }
         public bool ThrowSafetyAbortOnCreate { get; set; }
+        public bool AlwaysFailCreate { get; set; }
         public int CreateCount { get; private set; }
         public int CurrentWidth { get; private set; } = 540;
         public ScreenFit? CurrentFit { get; private set; }
@@ -53,6 +54,8 @@ public sealed class PhoneDeskTests : IDisposable
         public Task<uint> CreateAsync(ScreenFit fit, CancellationToken ct = default)
         {
             CreateCount++;
+            if (AlwaysFailCreate)
+                throw new PhoneScreenException(PhoneScreenErrorKind.CreateFailed, "Attach failed");
             if (ThrowSafetyAbortOnCreate)
                 throw new PhoneScreenException(PhoneScreenErrorKind.CreateFailed, "原主屏脱离", isSafetyAbort: true);
             uint id = (uint)(1000 + CreateCount);
@@ -442,6 +445,36 @@ public sealed class PhoneDeskTests : IDisposable
         Assert.Equal(PhoneScreenPhase.Failed, desk.State.ScreenPhase);
         Assert.Equal(1, displays.CreateCount);
         Assert.Equal(0, timeline.Now);
+    }
+
+    [Fact]
+    public async Task Create_ContinuousFailures_TripsCircuitBreakerAndStopsRetries()
+    {
+        var displays = new FakeDisplays { AlwaysFailCreate = true };
+        var timeline = new FakeTimeline();
+        var desk = new PhoneDesk(displays, new FakeWindows(), new FakeApps(), _paths, timeline);
+
+        desk.SetWanted(true);
+        await desk.IdleAsync();
+
+        Assert.Equal(PhoneScreenPhase.Failed, desk.State.ScreenPhase);
+        Assert.IsType<DeskNotice.CircuitBreakerTripped>(desk.State.Notice);
+        Assert.Equal(4, displays.CreateCount);
+
+        // Further SettleDisplays should NO-OP because circuit breaker is tripped
+        desk.SettleDisplays();
+        await desk.IdleAsync();
+        Assert.Equal(4, displays.CreateCount);
+
+        // DisplaysChanged should also NO-OP
+        desk.DisplaysChanged();
+        await desk.IdleAsync();
+        Assert.Equal(4, displays.CreateCount);
+
+        // Resetting via ResetCircuitBreaker should reset circuit breaker and allow retrying
+        desk.ResetCircuitBreaker();
+        await desk.IdleAsync();
+        Assert.True(displays.CreateCount > 4);
     }
 
     [Fact]
