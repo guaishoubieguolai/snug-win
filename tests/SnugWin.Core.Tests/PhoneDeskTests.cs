@@ -471,9 +471,8 @@ public sealed class PhoneDeskTests : IDisposable
         await desk.IdleAsync();
         Assert.Equal(4, displays.CreateCount);
 
-        // Resetting via manual toggle should reset circuit breaker
-        desk.SetWanted(false);
-        desk.SetWanted(true);
+        // Resetting via ResetCircuitBreaker should reset circuit breaker and allow retrying
+        desk.ResetCircuitBreaker();
         await desk.IdleAsync();
         Assert.True(displays.CreateCount > 4);
     }

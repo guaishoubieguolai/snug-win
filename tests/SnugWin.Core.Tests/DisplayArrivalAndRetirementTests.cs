@@ -62,6 +62,32 @@ public sealed class DisplayArrivalAndRetirementTests
         Assert.Empty(rig.Attachments);
     }
 
+    [Fact]
+    public async Task ReusedContainerId_FromDisconnectedOrPhantomDevice_CanBeClaimedOnNewArrival()
+    {
+        var rig = new DisplayOwnershipFixture();
+        var reused = new CherryMonitor(0, Guid.NewGuid());
+        rig.Arrive = _ => rig.Present.Add(reused);
+        var svc = rig.Service();
+        Assert.Equal(0u, await svc.CreateAsync(ScreenFit.Standard));
+        Assert.Equal(reused.ContainerId, Assert.Single(rig.Attachments).ContainerId);
+    }
+
+    [Fact]
+    public async Task Reshape_ReusingSameContainerId_SucceedsViaExpectedContainer()
+    {
+        var rig = new DisplayOwnershipFixture();
+        var monitor = new CherryMonitor(0, Guid.NewGuid());
+        rig.Arrive = _ => rig.Present.Add(monitor);
+        var svc = rig.Service();
+        uint id = await svc.CreateAsync(ScreenFit.Standard);
+        Assert.Equal(0u, id);
+
+        var newFit = new ScreenFit(2);
+        Assert.True(await svc.ReshapeAsync(id, newFit));
+        Assert.Equal(newFit, svc.FitOf(id));
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

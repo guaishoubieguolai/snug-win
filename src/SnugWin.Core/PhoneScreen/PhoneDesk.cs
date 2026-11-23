@@ -208,6 +208,10 @@ public sealed class PhoneDesk
     {
         _circuitBreakerTripped = false;
         _failures = 0;
+        if (State.Notice is DeskNotice.CircuitBreakerTripped)
+            State = State with { Notice = null };
+        if (_wanted && !State.Dismissed && _display is null)
+            _ = _lane.Run(ReconcileAsync);
     }
 
     public void DismissScreen()

@@ -144,6 +144,12 @@ public sealed class DeskSet
         }
     }
 
+    public void ResetCircuitBreaker()
+    {
+        foreach (var desk in _desks.Values)
+            desk.ResetCircuitBreaker();
+    }
+
     public void SetDefaultZoom(int steps)
     {
         _defaultZoom = steps;

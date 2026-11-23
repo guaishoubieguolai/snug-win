@@ -237,7 +237,7 @@ public sealed class AppController : ILogSink
             bool wantsTouch = signals.ManualOverride
                               || ControllerClassifier.WantsPhoneScreen(_session.EpisodeControllers(now));
             _desks.SetWishes(ScreenPlan.ForController(ScreenPlan.Wishes(_config, remote), wantsTouch, remote));
-            _desks.SetRemote(_session.InEpisode);
+            _desks.SetRemote(remote);
 
             if ((now - _lastVerifyAt).TotalSeconds >= 2.0)
             {
@@ -1049,6 +1049,7 @@ public sealed class AppController : ILogSink
     public void SetManualOverride(bool on)
     {
         _sensor.ManualOverride = on;
+        if (on) _desks.ResetCircuitBreaker();
         OnTick();
         UiStateChanged?.Invoke();
     }
