@@ -439,6 +439,7 @@ public partial class PhoneHomeWindow : Window
             DeskNotice.QuitStalled q => ($"{q.App} 未退出", "强制退出将丢失未存储的内容"),
             DeskNotice.Reshaped => ("屏幕比例已调整", "在 UU远程 中切到其他屏幕再切回，点按位置才准确"),
             DeskNotice.ReshapeFailed => ("屏幕比例未能调整", "下次连接时生效"),
+            DeskNotice.CircuitBreakerTripped => ("已触发建屏熔断保护", "防止屏幕闪烁，请确认驱动正常后在界面重新开启"),
             DeskNotice.ZoomLeftBehind z => ($"{z.App} 窗口已关闭", $"再打开时字号若偏大，按 {z.Steps} 次 Ctrl+- 复原"),
             _ => (string.Empty, string.Empty)
         };

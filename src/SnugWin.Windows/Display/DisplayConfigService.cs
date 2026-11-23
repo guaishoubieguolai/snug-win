@@ -115,7 +115,12 @@ public static unsafe class DisplayConfigService
             dm.dmDisplayFrequency = (uint)Math.Round(refreshRate);
             dm.dmFields |= Win32.DM_DISPLAYFREQUENCY;
         }
-        int res = Win32.ChangeDisplaySettingsExW(deviceName, ref dm, IntPtr.Zero, Win32.CDS_UPDATEREGISTRY, IntPtr.Zero);
+        // Prefer dynamic application (0) so we do not pollute Windows persistent boot registry with virtual screen modes
+        int res = Win32.ChangeDisplaySettingsExW(deviceName, ref dm, IntPtr.Zero, 0, IntPtr.Zero);
+        if (res != Win32.DISP_CHANGE_SUCCESSFUL)
+        {
+            res = Win32.ChangeDisplaySettingsExW(deviceName, ref dm, IntPtr.Zero, Win32.CDS_UPDATEREGISTRY, IntPtr.Zero);
+        }
         if (res == Win32.DISP_CHANGE_SUCCESSFUL) return true;
         Log.Warn($"ChangeDisplaySettingsEx({deviceName}, {pixelWidth}x{pixelHeight}) 返回 {res}");
         return false;

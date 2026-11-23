@@ -131,7 +131,11 @@ public sealed class DeskSet
         bool wasRemote = _remote;
         _remote = on;
         foreach (var desk in _desks.Values)
+        {
+            if (!wasRemote && on)
+                desk.ResetCircuitBreaker();
             desk.SetRemote(on);
+        }
         if (wasRemote && !on)
         {
             foreach (var desk in _desks.Values)

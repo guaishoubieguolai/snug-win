@@ -174,6 +174,7 @@ public static class StartupTaskDefinition
               <Triggers>
                 <LogonTrigger>
                   <Enabled>true</Enabled>
+                  <Delay>PT20S</Delay>
                 </LogonTrigger>
               </Triggers>
               <Principals>

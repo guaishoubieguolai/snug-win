@@ -92,6 +92,19 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
             .Select(m => (m.StableId, m.IsPrimary))
             .ToArray();
 
+    private static readonly TimeSpan MinModesetInterval = TimeSpan.FromSeconds(2.0);
+    private DateTimeOffset _lastModesetAt = DateTimeOffset.MinValue;
+
+    private async Task ThrottleModesetAsync(CancellationToken ct)
+    {
+        var elapsed = DateTimeOffset.Now - _lastModesetAt;
+        if (elapsed < MinModesetInterval)
+        {
+            await Task.Delay(MinModesetInterval - elapsed, ct).ConfigureAwait(false);
+        }
+        _lastModesetAt = DateTimeOffset.Now;
+    }
+
     private void EnsureNonCherryIntact(IReadOnlyList<(uint StableId, bool IsPrimary)> baseline)
     {
         if (baseline.Count == 0) return;
@@ -244,17 +257,31 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
         bool attempted = false;
         MonitorSnapshot? Observe()
         {
-            EnsureNonCherryIntact(baselineNonCherry);
             var online = _topology.Online(target, attachedName);
-            if (online is not null || attachedName is not null) return online;
-            if (attempted && sinceAttempt.ElapsedMilliseconds < 500) return null;
+            if (online is not null)
+            {
+                EnsureNonCherryIntact(baselineNonCherry);
+                return online;
+            }
+            if (attachedName is not null) return null;
+            if (attempted && sinceAttempt.ElapsedMilliseconds < 1500) return null;
             attempted = true;
             sinceAttempt.Restart();
             attachedName = _topology.Attach(target, w, h);
-            return attachedName is null ? null : _topology.Online(target, attachedName);
+            var immediate = attachedName is null ? null : _topology.Online(target, attachedName);
+            if (immediate is not null)
+            {
+                EnsureNonCherryIntact(baselineNonCherry);
+                return immediate;
+            }
+            return null;
         }
+        await ThrottleModesetAsync(ct).ConfigureAwait(false);
         if (await PollAsync(Observe, _timeout, ct).ConfigureAwait(false) is null)
+        {
+            EnsureNonCherryIntact(baselineNonCherry);
             throw new PhoneScreenException(PhoneScreenErrorKind.NeverOnline);
+        }
     }
 
     public async Task<bool> ReshapeAsync(uint displayId, ScreenFit fit, CancellationToken ct = default)

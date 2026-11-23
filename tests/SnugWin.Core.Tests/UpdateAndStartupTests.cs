@@ -77,6 +77,7 @@ public sealed class UpdateAndStartupTests
         XNamespace ns = "http://schemas.microsoft.com/windows/2004/02/mit/task";
 
         Assert.Equal("HighestAvailable", doc.Root!.Element(ns + "Principals")!.Element(ns + "Principal")!.Element(ns + "RunLevel")!.Value);
+        Assert.Equal("PT20S", doc.Root.Element(ns + "Triggers")!.Element(ns + "LogonTrigger")!.Element(ns + "Delay")!.Value);
         Assert.Equal("PT0S", doc.Root.Element(ns + "Settings")!.Element(ns + "ExecutionTimeLimit")!.Value);
         Assert.Equal("false", doc.Root.Element(ns + "Settings")!.Element(ns + "DisallowStartIfOnBatteries")!.Value);
         Assert.Equal(@"C:\Tools\Snug & Win\SnugWin.App.exe", doc.Root.Element(ns + "Actions")!.Element(ns + "Exec")!.Element(ns + "Command")!.Value);
