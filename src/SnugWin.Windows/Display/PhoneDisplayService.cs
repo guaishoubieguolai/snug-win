@@ -72,6 +72,10 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
             var (state, connectionId) = await DriverStateSessionAsync(ct).ConfigureAwait(false);
             var before = await ReadBaselineAsync(ct).ConfigureAwait(false);
             var baselineNonCherry = SnapshotNonCherryDisplays();
+            // [诊断] 记录初始baseline
+            var baselineInfo = string.Join(", ", _topology.Active().Where(m => m.Cherry is null).Select(m => 
+                $"#{m.StableId}(DeviceName={m.DeviceName},Primary={m.IsPrimary},Dedicated={m.HasDedicatedTarget},Adapter={m.AdapterId.LowPart:X}-{m.AdapterId.HighPart:X},Source={m.SourceId})"));
+            Log.Info($"[诊断] Baseline非Cherry显示器: {baselineInfo}");
             // 使用增强容错检查确认初始显示器状态
             await TryEnsureNonCherryIntactWithRetryAsync(baselineNonCherry, ct).ConfigureAwait(false);
             var occupied = before.OccupiedIds.Concat(_ready.Keys).Concat(_retiring.Keys).Concat(_unconfirmed).ToHashSet();
@@ -115,9 +119,19 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
         foreach (var (stableId, wasPrimary) in baseline)
         {
             if (!activeIds.Contains(stableId))
+            {
+                // [诊断] 记录StableId丢失和当前活动显示器信息
+                var baselineInfo = string.Join(", ", baseline.Select(b => $"#{b.StableId}(Primary={b.IsPrimary})"));
+                var currentInfo = string.Join(", ", active.Where(m => m.Cherry is null).Select(m => 
+                    $"#{m.StableId}(DeviceName={m.DeviceName},Primary={m.IsPrimary},Dedicated={m.HasDedicatedTarget},Adapter={m.AdapterId.LowPart:X}-{m.AdapterId.HighPart:X},Source={m.SourceId})"));
+                Log.Warn($"[诊断] 检测到StableId #{stableId} 丢失！");
+                Log.Warn($"[诊断] Baseline非Cherry显示器: {baselineInfo}");
+                Log.Warn($"[诊断] Current活动非Cherry显示器: {currentInfo}");
+                
                 throw Failed(wasPrimary
                     ? "建屏过程中原主显示器脱离活动桌面，已中止以保护桌面输出"
                     : "建屏过程中原有非 Cherry 显示器脱离活动桌面，已中止", isSafetyAbort: true);
+            }
         }
     }
 
