@@ -1,0 +1,164 @@
+name: PR Test Build
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: pr-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & Test for PR
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.404'
+          cache: true
+          cache-dependency-path: '**/*.csproj'
+
+      - name: Restore dependencies
+        run: dotnet restore SnugWin.sln
+
+      - name: Build Release
+        run: dotnet build SnugWin.sln -c Release --no-restore -warnaserror
+
+      - name: Run tests
+        run: dotnet test SnugWin.sln -c Release --no-build --logger "trx;LogFileName=test-results.trx" --results-directory TestResults --verbosity normal
+
+      - name: Publish self-contained portable
+        run: |
+          dotnet publish src/SnugWin.App/SnugWin.App.csproj `
+            -c Release `
+            --no-build `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=false `
+            -p:DebugType=None `
+            -p:DebugSymbols=false `
+            -o publish/snugwin-test
+
+      - name: Copy driver to publish folder
+        shell: pwsh
+        run: |
+          if (Test-Path "driver") {
+            Copy-Item -Path "driver" -Destination "publish/snugwin-test/driver" -Recurse -Force
+            Write-Host "Driver folder copied to publish directory"
+          } else {
+            Write-Warning "Driver folder not found in repository root"
+          }
+
+      - name: Copy LICENSE
+        shell: pwsh
+        run: |
+          if (Test-Path "LICENSE") {
+            Copy-Item -Path "LICENSE" -Destination "publish/snugwin-test/" -Force
+          }
+          if (Test-Path "THIRD_PARTY_NOTICES.md") {
+            Copy-Item -Path "THIRD_PARTY_NOTICES.md" -Destination "publish/snugwin-test/" -Force
+          }
+
+      - name: Create README for test build
+        shell: pwsh
+        run: |
+          $readme = @"
+          # SnugWin PR Test Build
+          
+          This is a TEST BUILD from PR #${{ github.event.pull_request.number }}
+          Commit: ${{ github.sha }}
+          
+          ## 警告 / Warning
+          - 这是测试版本，仅用于验证修复
+          - This is a test build for verification purposes only
+          - 不会自动替换正在运行的程序
+          - Will not automatically replace running programs
+          
+          ## 使用方法 / Usage
+          1. 关闭正在运行的 SnugWin（如有）
+          2. 解压此文件到任意目录
+          3. 运行 SnugWin.App.exe
+          4. 驱动已包含在 driver/ 目录，如需安装可在设置中操作
+          
+          ## 回滚 / Rollback
+          - 要回到稳定版本，重新安装 v1.3.2 官方版本
+          - To rollback, reinstall v1.3.2 official release
+          
+          ## 验证步骤 / Verification Steps
+          1. 启动 UU GameViewer 连接手机
+          2. 启动 SnugWin
+          3. 断开 UU 连接
+          4. 重新连接 UU
+          5. 验证是否成功建立手机屏，不再报"主显示器脱离活动桌面"错误
+          "@
+          $readme | Out-File -FilePath "publish/snugwin-test/README-TEST.txt" -Encoding UTF8
+
+      - name: Calculate SHA256
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path "publish/snugwin-test" -Recurse -File
+          $hashes = @()
+          foreach ($file in $files) {
+            $hash = Get-FileHash -Path $file.FullName -Algorithm SHA256
+            $relativePath = $file.FullName.Replace((Get-Item "publish/snugwin-test").FullName, "").TrimStart('\')
+            $hashes += "$($hash.Hash)  $relativePath"
+          }
+          $hashes | Out-File -FilePath "publish/snugwin-test/SHA256SUMS.txt" -Encoding UTF8
+          Write-Host "SHA256 checksums calculated"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: snugwin-pr${{ github.event.pull_request.number }}-test-win-x64
+          path: publish/snugwin-test/**
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9
+
+      - name: Comment on PR with artifact info
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runId = context.runId;
+            const repo = context.repo;
+            const prNumber = context.issue.number;
+            const sha = context.sha.substring(0, 7);
+            
+            const comment = `### ✅ 测试包已构建 / Test Build Ready
+            
+            **Commit**: \`${sha}\`
+            **Run ID**: [${runId}](https://github.com/${repo.owner}/${repo.repo}/actions/runs/${runId})
+            
+            📦 **下载测试包 / Download Test Build**:
+            前往 [Actions Run](https://github.com/${repo.owner}/${repo.repo}/actions/runs/${runId}) 页面下载 \`snugwin-pr${prNumber}-test-win-x64\` artifact
+            
+            ⚠️ **注意 / Note**:
+            - 这是未签名的测试版本 / This is an unsigned test build
+            - 仅用于验证修复 / For verification purposes only
+            - 包含 SHA256 校验和 / Includes SHA256 checksums
+            - 7天后自动删除 / Auto-deleted after 7 days
+            `;
+            
+            github.rest.issues.createComment({
+              owner: repo.owner,
+              repo: repo.repo,
+              issue_number: prNumber,
+              body: comment
+            });
