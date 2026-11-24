@@ -129,35 +129,3 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 9
-
-      - name: Comment on PR with artifact info
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const runId = context.runId;
-            const repo = context.repo;
-            const prNumber = context.issue.number;
-            const sha = context.sha.substring(0, 7);
-            
-            const comment = `### ✅ 测试包已构建 / Test Build Ready
-            
-            **Commit**: \`${sha}\`
-            **Run ID**: [${runId}](https://github.com/${repo.owner}/${repo.repo}/actions/runs/${runId})
-            
-            📦 **下载测试包 / Download Test Build**:
-            前往 [Actions Run](https://github.com/${repo.owner}/${repo.repo}/actions/runs/${runId}) 页面下载 \`snugwin-pr${prNumber}-test-win-x64\` artifact
-            
-            ⚠️ **注意 / Note**:
-            - 这是未签名的测试版本 / This is an unsigned test build
-            - 仅用于验证修复 / For verification purposes only
-            - 包含 SHA256 校验和 / Includes SHA256 checksums
-            - 7天后自动删除 / Auto-deleted after 7 days
-            `;
-            
-            github.rest.issues.createComment({
-              owner: repo.owner,
-              repo: repo.repo,
-              issue_number: prNumber,
-              body: comment
-            });
