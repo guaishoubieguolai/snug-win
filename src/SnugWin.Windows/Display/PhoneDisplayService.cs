@@ -72,10 +72,17 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
             var (state, connectionId) = await DriverStateSessionAsync(ct).ConfigureAwait(false);
             var before = await ReadBaselineAsync(ct).ConfigureAwait(false);
             var baselineNonCherry = SnapshotNonCherryDisplays();
-            // [诊断] 记录初始baseline
-            var baselineInfo = string.Join(", ", _topology.Active().Where(m => m.Cherry is null).Select(m => 
-                $"#{m.StableId}(DeviceName={m.DeviceName},Primary={m.IsPrimary},Dedicated={m.HasDedicatedTarget},Adapter={m.AdapterId.LowPart:X}-{m.AdapterId.HighPart:X},Source={m.SourceId})"));
-            Log.Info($"[诊断] Baseline非Cherry显示器: {baselineInfo}");
+            // [诊断] 记录初始baseline完整信息
+            var baselineList = _topology.Active().Where(m => m.Cherry is null).ToList();
+            Log.Info($"[诊断] CreateAsync开始 - Baseline非Cherry显示器数量: {baselineList.Count}");
+            if (baselineList.Count > 0)
+            {
+                foreach (var m in baselineList)
+                {
+                    var targetPath = m.HasDedicatedTarget ? GetTargetPathForDiagnostic(m) : "N/A";
+                    Log.Info($"[诊断]   #{m.StableId}: Name={m.DeviceName}, Primary={m.IsPrimary}, Dedicated={m.HasDedicatedTarget}, Luid={m.AdapterId.LowPart:X8}-{m.AdapterId.HighPart:X8}, Src={m.SourceId}, Path={targetPath}");
+                }
+            }
             // 使用增强容错检查确认初始显示器状态
             await TryEnsureNonCherryIntactWithRetryAsync(baselineNonCherry, ct).ConfigureAwait(false);
             var occupied = before.OccupiedIds.Concat(_ready.Keys).Concat(_retiring.Keys).Concat(_unconfirmed).ToHashSet();
@@ -115,23 +122,49 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
     {
         if (baseline.Count == 0) return;
         var active = _topology.Active();
-        var activeIds = active.Where(m => m.Cherry is null).Select(m => m.StableId).ToHashSet();
+        var activeNonCherry = active.Where(m => m.Cherry is null).ToList();
+        var activeIds = activeNonCherry.Select(m => m.StableId).ToHashSet();
+        
         foreach (var (stableId, wasPrimary) in baseline)
         {
             if (!activeIds.Contains(stableId))
             {
-                // [诊断] 记录StableId丢失和当前活动显示器信息
+                // [诊断] 记录完整显示器身份信息用于StableId变化分析
                 var baselineInfo = string.Join(", ", baseline.Select(b => $"#{b.StableId}(Primary={b.IsPrimary})"));
-                var currentInfo = string.Join(", ", active.Where(m => m.Cherry is null).Select(m => 
-                    $"#{m.StableId}(DeviceName={m.DeviceName},Primary={m.IsPrimary},Dedicated={m.HasDedicatedTarget},Adapter={m.AdapterId.LowPart:X}-{m.AdapterId.HighPart:X},Source={m.SourceId})"));
-                Log.Warn($"[诊断] 检测到StableId #{stableId} 丢失！");
-                Log.Warn($"[诊断] Baseline非Cherry显示器: {baselineInfo}");
-                Log.Warn($"[诊断] Current活动非Cherry显示器: {currentInfo}");
+                var currentInfo = activeNonCherry.Count == 0 
+                    ? "EMPTY - 枚举返回0个非Cherry显示器"
+                    : string.Join(", ", activeNonCherry.Select(m => {
+                        var source = _topology.Active().FirstOrDefault(s => s.StableId == m.StableId);
+                        var targetPath = m.HasDedicatedTarget ? GetTargetPathForDiagnostic(m) : "N/A";
+                        return $"#{m.StableId}(Name={m.DeviceName},Primary={m.IsPrimary},Dedicated={m.HasDedicatedTarget},Luid={m.AdapterId.LowPart:X8}-{m.AdapterId.HighPart:X8},Src={m.SourceId},Path={targetPath})";
+                    }));
+                
+                Log.Warn($"[诊断] 检测到StableId #{stableId}(Primary={wasPrimary}) 在baseline中但current中丢失");
+                Log.Warn($"[诊断] Baseline非Cherry显示器数量: {baseline.Count}, IDs: {baselineInfo}");
+                Log.Warn($"[诊断] Current非Cherry显示器数量: {activeNonCherry.Count}, {currentInfo}");
                 
                 throw Failed(wasPrimary
                     ? "建屏过程中原主显示器脱离活动桌面，已中止以保护桌面输出"
                     : "建屏过程中原有非 Cherry 显示器脱离活动桌面，已中止", isSafetyAbort: true);
             }
+        }
+    }
+    
+    private string GetTargetPathForDiagnostic(MonitorSnapshot monitor)
+    {
+        try
+        {
+            // TargetPath存储在CcdSource中，通过CcdTopology.Query获取
+            var topology = CcdTopology.Query(Win32.QDC_ONLY_ACTIVE_PATHS);
+            if (topology is null) return "QueryFailed";
+            var sources = topology.ActiveSources();
+            if (sources.TryGetValue(monitor.DeviceName, out var source))
+                return string.IsNullOrEmpty(source.TargetPath) ? "EMPTY" : source.TargetPath;
+            return "NotFound";
+        }
+        catch (Exception ex)
+        {
+            return $"Error:{ex.GetType().Name}";
         }
     }
 
