@@ -319,20 +319,16 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
         MonitorSnapshot? Observe()
         {
             pollCount++;
-            // 在前几次轮询中使用容错检查，避免瞬态枚举问题导致误判
-            // 只在关键检查点（attach前、成功后、超时时）使用严格检查
-            bool useStrictCheck = !attempted || pollCount % 5 == 0;
-            if (useStrictCheck)
+            // 安全策略：前2次轮询容忍单次失败(瞬态枚举)，之后每次都严格检查
+            // 只有在前2次且捕获到失败时才容忍，确保真实主屏丢失能快速检测
+            try
             {
-                try
-                {
-                    EnsureNonCherryIntact(baselineNonCherry);
-                }
-                catch (PhoneScreenException ex) when (ex.IsSafetyAbort && pollCount <= 2)
-                {
-                    // 仅在前2次轮询中容忍单次检查失败，给Windows枚举API一点稳定时间
-                    Log.Warn($"首次检测到显示器拓扑变化（第 {pollCount} 次轮询），等待确认");
-                }
+                EnsureNonCherryIntact(baselineNonCherry);
+            }
+            catch (PhoneScreenException ex) when (ex.IsSafetyAbort && pollCount <= 2)
+            {
+                // 仅在前2次轮询中容忍单次检查失败，给Windows枚举API稳定时间（约100-200ms）
+                Log.Warn($"第 {pollCount} 次轮询检测到显示器拓扑变化，等待确认（前2次容忍瞬态枚举）");
             }
 
             var online = _topology.Online(target, attachedName);
