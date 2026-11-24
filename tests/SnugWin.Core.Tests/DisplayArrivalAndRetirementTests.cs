@@ -240,4 +240,44 @@ public sealed class DisplayArrivalAndRetirementTests
         Assert.True(svc.IsAttachedToDesktop(id));
         Assert.NotNull(svc.BoundsOf(id));
     }
+
+    [Fact]
+    public async Task Create_ToleratesTransientEnumerationGlitches()
+    {
+        var rig = new DisplayOwnershipFixture();
+        var physical = DisplayOwnershipFixture.Monitor("physical-primary", primary: true);
+        rig.Desktop.Add(physical);
+
+        // 模拟Windows枚举API的瞬态问题：首次Active()调用返回空列表，之后正常
+        int activeCallCount = 0;
+        var originalDesktop = rig.Desktop;
+        rig.TopologyOverride = new TestTopologyWithTransientGlitch(rig, () =>
+        {
+            activeCallCount++;
+            return activeCallCount == 1 ? new List<MonitorSnapshot>() : originalDesktop;
+        });
+
+        var svc = rig.Service();
+        // 应该成功创建，因为容错机制会重试
+        uint id = await svc.CreateAsync(ScreenFit.Standard);
+        Assert.Equal(0u, id);
+        Assert.True(activeCallCount >= 2, "应该至少尝试了2次枚举");
+    }
+
+    [Fact]
+    public async Task Create_FailsWhenPrimaryDisplayActuallyLost()
+    {
+        var rig = new DisplayOwnershipFixture();
+        var physical = DisplayOwnershipFixture.Monitor("physical-primary", primary: true);
+        rig.Desktop.Add(physical);
+
+        // 模拟真实的显示器丢失：所有枚举都返回空
+        rig.TopologyOverride = new TestTopologyWithPermanentLoss();
+
+        var svc = rig.Service();
+        // 应该失败，因为显示器确实丢失了
+        var ex = await Assert.ThrowsAsync<PhoneScreenException>(() => svc.CreateAsync(ScreenFit.Standard));
+        Assert.Equal(PhoneScreenErrorKind.CreateFailed, ex.Kind);
+        Assert.True(ex.IsSafetyAbort);
+    }
 }
