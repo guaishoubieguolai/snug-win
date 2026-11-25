@@ -102,7 +102,7 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
 
     private IReadOnlyList<(uint StableId, bool IsPrimary)> SnapshotNonCherryDisplays() =>
         _topology.Active()
-            .Where(m => m.Cherry is null && m.HasDedicatedTarget)
+            .Where(m => m.Cherry is null && (m.HasDedicatedTarget || m.IsPrimary))
             .Select(m => (m.StableId, m.IsPrimary))
             .ToArray();
 
