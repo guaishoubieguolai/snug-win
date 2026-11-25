@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using SnugWin.Core.PhoneScreen;
+using SnugWin.Core.Support;
 using SnugWin.Windows.Native;
 
 namespace SnugWin.Windows.Display;
@@ -39,18 +40,34 @@ internal sealed unsafe record CcdTopology(Win32.DISPLAYCONFIG_PATH_INFO[] Paths,
 
     public string? Attach(CherryMonitor monitor, int width, int height)
     {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         var active = Paths.Where(IsActive).ToList();
         if (active.Count == 0 || active.Any(p => !HasSourceMode(p))) return null;
         var desired = FindDetachedPath(monitor, active);
-        if (desired is not { } path) return null;
+        if (desired is not { } path)
+        {
+            Log.Warn($"[诊断-错误87] FindDetachedPath未找到Cherry #{monitor.DriverId} detached path (ContainerId={monitor.ContainerId})");
+            return null;
+        }
         string name = SourceName(path.sourceInfo);
         if (name.Length == 0) return null;
+
+        // [诊断-错误87] 记录找到的detached path详情
+        Log.Info($"[诊断-错误87] Cherry #{monitor.DriverId} detached path找到: " +
+            $"Src(AdapterId={path.sourceInfo.adapterId.LowPart:X8}-{path.sourceInfo.adapterId.HighPart:X8}, " +
+            $"Id={path.sourceInfo.id}, ModeIdx={path.sourceInfo.modeInfoIdx}), " +
+            $"Tgt(AdapterId={path.targetInfo.adapterId.LowPart:X8}-{path.targetInfo.adapterId.HighPart:X8}, " +
+            $"Id={path.targetInfo.id}, Available={path.targetInfo.targetAvailable}), " +
+            $"Flags=0x{path.flags:X}");
 
         // Re-check active topology right before submitting; a Win32 full-topology SetDisplayConfig
         // still retains an irreducible kernel TOCTOU window after this read.
         var latestActive = Query(Win32.QDC_ONLY_ACTIVE_PATHS)?.Paths.Where(IsActive).ToList();
         if (latestActive is null || !SameActivePaths(active, latestActive))
+        {
+            Log.Warn($"[诊断-错误87] TOCTOU检测到拓扑变化，放弃本次Attach (耗时={sw.ElapsedMilliseconds}ms)");
             return null;
+        }
 
         var rightmost = active.Select(p => Modes[p.sourceInfo.modeInfoIdx].info.sourceMode)
             .MaxBy(s => (long)s.position.X + s.width);
@@ -65,11 +82,35 @@ internal sealed unsafe record CcdTopology(Win32.DISPLAYCONFIG_PATH_INFO[] Paths,
         path.targetInfo.modeInfoIdx = uint.MaxValue;
         path.flags |= Win32.DISPLAYCONFIG_PATH_ACTIVE;
         active.Add(path);
+        
+        // [诊断-错误87] 记录SetDisplayConfig参数
+        Log.Info($"[诊断-错误87] 调用SetDisplayConfig: pathCount={active.Count}, modeCount={(uint)Modes.Length + 1}, " +
+            $"新mode(width={width}, height={height}, pos=({position.X},{position.Y}), pixelFormat=4, modeIdx={path.sourceInfo.modeInfoIdx}), " +
+            $"flags=SDC_USE_SUPPLIED_DISPLAY_CONFIG|SDC_APPLY");
+        
         // Keep every existing active path, mode and priority; do not allow Windows
         // to change other displays to make this request succeed.
+        sw.Restart();
         int error = Win32.SetDisplayConfig((uint)active.Count, active.ToArray(), (uint)Modes.Length + 1,
             [.. Modes, mode], Win32.SDC_USE_SUPPLIED_DISPLAY_CONFIG | Win32.SDC_APPLY);
-        if (error != 0) throw new PhoneScreenException(PhoneScreenErrorKind.CreateFailed, $"挂载 Cherry 显示器 #{monitor.DriverId} 失败（{error}）");
+        sw.Stop();
+        
+        if (error != 0)
+        {
+            // [诊断-错误87] 记录失败详情
+            Log.Error($"[诊断-错误87] SetDisplayConfig失败: 错误码={error}, 耗时={sw.ElapsedMilliseconds}ms");
+            Log.Error($"[诊断-错误87] Cherry path详情: Src.adapterId={path.sourceInfo.adapterId.LowPart:X8}-{path.sourceInfo.adapterId.HighPart:X8}, " +
+                $"Src.id={path.sourceInfo.id}, Src.modeIdx={path.sourceInfo.modeInfoIdx}, " +
+                $"Tgt.adapterId={path.targetInfo.adapterId.LowPart:X8}-{path.targetInfo.adapterId.HighPart:X8}, " +
+                $"Tgt.id={path.targetInfo.id}, Tgt.modeIdx={path.targetInfo.modeInfoIdx}, flags=0x{path.flags:X}");
+            Log.Error($"[诊断-错误87] 新mode详情: width={width}, height={height}, position=({position.X},{position.Y}), " +
+                $"adapterId={mode.adapterId.LowPart:X8}-{mode.adapterId.HighPart:X8}, id={mode.id}, modeIdx={(uint)Modes.Length}");
+            Log.Error($"[诊断-错误87] active paths count={active.Count}, total modes count={(uint)Modes.Length + 1}");
+            
+            throw new PhoneScreenException(PhoneScreenErrorKind.CreateFailed, $"挂载 Cherry 显示器 #{monitor.DriverId} 失败（{error}）");
+        }
+        
+        Log.Info($"[诊断-错误87] SetDisplayConfig成功, 耗时={sw.ElapsedMilliseconds}ms, DeviceName={name}");
         return name;
     }
 
