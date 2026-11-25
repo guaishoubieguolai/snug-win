@@ -14,7 +14,6 @@ namespace SnugWin.Windows.Windows;
 
 public sealed class WindowService : IWindowControl
 {
-    private static readonly ILog Log = LogProvider.GetCurrentClassLogger();
     private const int MoveRetries = 6;
     private const int RetryDelayMs = 120;
 
