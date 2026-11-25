@@ -3,6 +3,7 @@ using System.Diagnostics;
 using SnugWin.Core.Persistence;
 using SnugWin.Core.PhoneScreen;
 using SnugWin.Core.Support;
+using SnugWin.Windows.Native;
 
 namespace SnugWin.Windows.Display;
 
@@ -72,6 +73,19 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
             var (state, connectionId) = await DriverStateSessionAsync(ct).ConfigureAwait(false);
             var before = await ReadBaselineAsync(ct).ConfigureAwait(false);
             var baselineNonCherry = SnapshotNonCherryDisplays();
+            // [诊断] 记录初始baseline完整信息
+            var baselineList = _topology.Active().Where(m => m.Cherry is null).ToList();
+            Log.Info($"[诊断] CreateAsync开始 - Baseline非Cherry显示器数量: {baselineList.Count}");
+            if (baselineList.Count > 0)
+            {
+                foreach (var m in baselineList)
+                {
+                    var targetPath = m.HasDedicatedTarget ? GetTargetPathForDiagnostic(m) : "N/A";
+                    Log.Info($"[诊断]   #{m.StableId}: Name={m.DeviceName}, Primary={m.IsPrimary}, Dedicated={m.HasDedicatedTarget}, Luid={m.AdapterId.LowPart:X8}-{m.AdapterId.HighPart:X8}, Src={m.SourceId}, Path={targetPath}");
+                }
+            }
+            // 使用增强容错检查确认初始显示器状态
+            await TryEnsureNonCherryIntactWithRetryAsync(baselineNonCherry, ct).ConfigureAwait(false);
             var occupied = before.OccupiedIds.Concat(_ready.Keys).Concat(_retiring.Keys).Concat(_unconfirmed).ToHashSet();
             occupied.UnionWith(state is null ? _topology.LegacyProfileIds() : state.Select(m => m.Id));
             uint id = PhoneScreenSpec.CandidateIds.FirstOrDefault(i => !occupied.Contains(i), uint.MaxValue);
@@ -88,7 +102,7 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
 
     private IReadOnlyList<(uint StableId, bool IsPrimary)> SnapshotNonCherryDisplays() =>
         _topology.Active()
-            .Where(m => m.Cherry is null)
+            .Where(m => m.Cherry is null && m.HasDedicatedTarget)
             .Select(m => (m.StableId, m.IsPrimary))
             .ToArray();
 
@@ -107,16 +121,111 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
 
     private void EnsureNonCherryIntact(IReadOnlyList<(uint StableId, bool IsPrimary)> baseline)
     {
-        if (baseline.Count == 0) return;
         var active = _topology.Active();
-        var activeIds = active.Where(m => m.Cherry is null).Select(m => m.StableId).ToHashSet();
-        foreach (var (stableId, wasPrimary) in baseline)
+        var activeNonCherry = active.Where(m => m.Cherry is null).ToList();
+        
+        // 检查1: 确保所有物理显示器（HasDedicatedTarget=true）仍然存在
+        if (baseline.Count > 0)
         {
-            if (!activeIds.Contains(stableId))
-                throw Failed(wasPrimary
-                    ? "建屏过程中原主显示器脱离活动桌面，已中止以保护桌面输出"
-                    : "建屏过程中原有非 Cherry 显示器脱离活动桌面，已中止", isSafetyAbort: true);
+            var activeIds = activeNonCherry.Select(m => m.StableId).ToHashSet();
+            foreach (var (stableId, wasPrimary) in baseline)
+            {
+                if (!activeIds.Contains(stableId))
+                {
+                    // [诊断] 记录完整显示器身份信息用于StableId变化分析
+                    var baselineInfo = string.Join(", ", baseline.Select(b => $"#{b.StableId}(Primary={b.IsPrimary})"));
+                    var currentInfo = activeNonCherry.Count == 0 
+                        ? "EMPTY - 枚举返回0个非Cherry显示器"
+                        : string.Join(", ", activeNonCherry.Select(m => {
+                            var targetPath = m.HasDedicatedTarget ? GetTargetPathForDiagnostic(m) : "N/A";
+                            return $"#{m.StableId}(Name={m.DeviceName},Primary={m.IsPrimary},Dedicated={m.HasDedicatedTarget},Luid={m.AdapterId.LowPart:X8}-{m.AdapterId.HighPart:X8},Src={m.SourceId},Path={targetPath})";
+                        }));
+                    
+                    Log.Warn($"[诊断] 检测到StableId #{stableId}(Primary={wasPrimary}) 在baseline中但current中丢失");
+                    Log.Warn($"[诊断] Baseline物理显示器数量: {baseline.Count}, IDs: {baselineInfo}");
+                    Log.Warn($"[诊断] Current非Cherry显示器数量: {activeNonCherry.Count}, {currentInfo}");
+                    
+                    throw Failed(wasPrimary
+                        ? "建屏过程中原主显示器脱离活动桌面，已中止以保护桌面输出"
+                        : "建屏过程中原有非 Cherry 显示器脱离活动桌面，已中止", isSafetyAbort: true);
+                }
+            }
         }
+        
+        // 检查2: 确保至少有一个主显示器存在（无论是物理还是临时）
+        bool hasPrimary = activeNonCherry.Any(m => m.IsPrimary);
+        if (!hasPrimary)
+        {
+            var currentInfo = activeNonCherry.Count == 0 
+                ? "EMPTY - 枚举返回0个非Cherry显示器"
+                : string.Join(", ", activeNonCherry.Select(m => {
+                    var targetPath = m.HasDedicatedTarget ? GetTargetPathForDiagnostic(m) : "N/A";
+                    return $"#{m.StableId}(Name={m.DeviceName},Primary={m.IsPrimary},Dedicated={m.HasDedicatedTarget},Path={targetPath})";
+                }));
+            
+            Log.Warn($"[诊断] 检测到所有非Cherry显示器都不是主显示器");
+            Log.Warn($"[诊断] Current非Cherry显示器数量: {activeNonCherry.Count}, {currentInfo}");
+            
+            throw Failed("建屏过程中主显示器属性丢失，已中止以保护桌面输出", isSafetyAbort: true);
+        }
+    }
+    
+    private string GetTargetPathForDiagnostic(MonitorSnapshot monitor)
+    {
+        try
+        {
+            // TargetPath存储在CcdSource中，通过CcdTopology.Query获取
+            var topology = CcdTopology.Query(Win32.QDC_ONLY_ACTIVE_PATHS);
+            if (topology is null) return "QueryFailed";
+            var sources = topology.ActiveSources();
+            if (sources.TryGetValue(monitor.DeviceName, out var source))
+                return string.IsNullOrEmpty(source.TargetPath) ? "EMPTY" : source.TargetPath;
+            return "NotFound";
+        }
+        catch (Exception ex)
+        {
+            return $"Error:{ex.GetType().Name}";
+        }
+    }
+
+    /// <summary>
+    /// 增强容错的显示器完整性检查：短暂重试以区分真实显示器丢失 vs Windows 枚举瞬态问题。
+    /// </summary>
+    private async Task<bool> TryEnsureNonCherryIntactWithRetryAsync(
+        IReadOnlyList<(uint StableId, bool IsPrimary)> baseline,
+        CancellationToken ct)
+    {
+        if (baseline.Count == 0) return true;
+
+        const int maxAttempts = 3;
+        const int retryDelayMs = 50;
+
+        for (int attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var active = _topology.Active();
+            var activeIds = active.Where(m => m.Cherry is null).Select(m => m.StableId).ToHashSet();
+            
+            bool allPresent = true;
+            foreach (var (stableId, _) in baseline)
+            {
+                if (!activeIds.Contains(stableId))
+                {
+                    allPresent = false;
+                    break;
+                }
+            }
+
+            if (allPresent) return true;
+
+            if (attempt < maxAttempts - 1)
+                await Task.Delay(retryDelayMs, ct).ConfigureAwait(false);
+        }
+
+        // 多次重试后仍然丢失，确认是真实的显示器丢失
+        EnsureNonCherryIntact(baseline);
+        return false; // 不会到达这里，EnsureNonCherryIntact 会抛出异常
     }
 
     private async Task<CherryInventory> ReadBaselineAsync(CancellationToken ct)
@@ -200,9 +309,11 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
             _unconfirmed.Remove(proof.DriverId);
             _ownership.Record(proof);
             await WaitForDesktopAsync(proof, fit, baselineNonCherry, ct).ConfigureAwait(false);
-            EnsureNonCherryIntact(baselineNonCherry);
+            // WaitForDesktopAsync 内部已做增强容错检查，这里使用增强容错进行最终确认
+            await TryEnsureNonCherryIntactWithRetryAsync(baselineNonCherry, ct).ConfigureAwait(false);
             await ApplyWidthAsync(proof, fit, fit.BaseWidth, ct).ConfigureAwait(false);
-            EnsureNonCherryIntact(baselineNonCherry);
+            // ApplyWidth后再次增强容错检查
+            await TryEnsureNonCherryIntactWithRetryAsync(baselineNonCherry, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             _ready[monitor.Id] = new(proof, fit, monitor.Name!);
             Log.Info($"Cherry 手机屏 #{monitor.Id} 已按 EDID 确认并切到 {fit}");
@@ -271,9 +382,22 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
         string? attachedName = null;
         var sinceAttempt = Stopwatch.StartNew();
         bool attempted = false;
+        int pollCount = 0;
         MonitorSnapshot? Observe()
         {
-            EnsureNonCherryIntact(baselineNonCherry);
+            pollCount++;
+            // 安全策略：前2次轮询容忍单次失败(瞬态枚举)，之后每次都严格检查
+            // 只有在前2次且捕获到失败时才容忍，确保真实主屏丢失能快速检测
+            try
+            {
+                EnsureNonCherryIntact(baselineNonCherry);
+            }
+            catch (PhoneScreenException ex) when (ex.IsSafetyAbort && pollCount <= 2)
+            {
+                // 仅在前2次轮询中容忍单次检查失败，给Windows枚举API稳定时间（约100-200ms）
+                Log.Warn($"第 {pollCount} 次轮询检测到显示器拓扑变化，等待确认（前2次容忍瞬态枚举）");
+            }
+
             var online = _topology.Online(target, attachedName);
             if (online is not null) return online;
             if (attachedName is not null) return null;
@@ -286,9 +410,12 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
         await ThrottleModesetAsync(ct).ConfigureAwait(false);
         if (await PollAsync(Observe, _timeout, ct).ConfigureAwait(false) is null)
         {
-            EnsureNonCherryIntact(baselineNonCherry);
+            // 超时前进行最终严格检查，使用增强容错
+            await TryEnsureNonCherryIntactWithRetryAsync(baselineNonCherry, ct).ConfigureAwait(false);
             throw new PhoneScreenException(PhoneScreenErrorKind.NeverOnline);
         }
+        // 成功后进行最终确认，使用增强容错
+        await TryEnsureNonCherryIntactWithRetryAsync(baselineNonCherry, ct).ConfigureAwait(false);
     }
 
     public async Task<bool> ReshapeAsync(uint displayId, ScreenFit fit, CancellationToken ct = default)
@@ -520,16 +647,31 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
     private async Task ApplyWidthAsync(CherryMonitor target, ScreenFit fit, int width, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+        var totalTimer = Stopwatch.StartNew();
         var (w, h) = fit.PixelSize(width);
         var current = _topology.Online(target) ?? throw Failed($"未找到独立的 Cherry 手机屏 #{target.DriverId}");
         bool Sized(MonitorSnapshot? m) => m?.Mode.Width == w && m.Mode.Height == h && Math.Abs(m.Mode.RefreshRate - 60.0) < 1.0;
         MonitorSnapshot? ReadSize() => _topology.Online(target) is { } m && Sized(m) ? m : null;
         if (!Sized(current))
         {
+            Log.Info($"[诊断] SetResolution开始: #{target.DriverId}, {w}x{h}@60Hz");
+            var setTimer = Stopwatch.StartNew();
             if (!_topology.SetResolution(current, w, h, 60)) throw Failed($"Cherry 手机屏 #{target.DriverId} 切换 {w}x{h} @ 60Hz 失败");
-            current = await PollAsync(ReadSize, _timeout, ct).ConfigureAwait(false) ?? throw Failed($"未确认手机屏已切换 {w}x{h} @ 60Hz");
+            Log.Info($"[诊断] SetResolution完成: {setTimer.Elapsed.TotalSeconds:0.1}s");
+            
+            var pollTimer = Stopwatch.StartNew();
+            current = await PollAsync(ReadSize, _timeout, ct).ConfigureAwait(false);
+            if (current is null)
+            {
+                Log.Warn($"[诊断] Poll分辨率超时: {pollTimer.Elapsed.TotalSeconds:0.1}s");
+                throw Failed($"未确认手机屏已切换 {w}x{h} @ 60Hz");
+            }
+            Log.Info($"[诊断] Poll分辨率成功: {pollTimer.Elapsed.TotalSeconds:0.1}s");
         }
+        
+        var scaleTimer = Stopwatch.StartNew();
         await ApplyScaleAsync(current, fit.TargetDpiPercent(width), ReadSize, ct).ConfigureAwait(false);
+        Log.Info($"[诊断] ApplyScale耗时: {scaleTimer.Elapsed.TotalSeconds:0.1}s, 总耗时: {totalTimer.Elapsed.TotalSeconds:0.1}s");
     }
 
     private async Task ApplyScaleAsync(MonitorSnapshot current, int requested, Func<MonitorSnapshot?> readSize, CancellationToken ct)
@@ -537,10 +679,25 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
         ct.ThrowIfCancellationRequested();
         int dpi = current.ResolveDpiScalePercent(requested) ?? throw Failed("无法确认手机屏支持的缩放档位");
         if (dpi != requested) Log.Info($"Cherry 手机屏 #{current.Cherry!.DriverId} 请求 {requested}% 缩放，最接近的支持档位为 {dpi}%");
-        if (current.Mode.DpiScalePercent == dpi) return;
+        if (current.Mode.DpiScalePercent == dpi)
+        {
+            Log.Info($"[诊断] ApplyScale跳过: DPI已是{dpi}%");
+            return;
+        }
+        
+        Log.Info($"[诊断] SetScale开始: #{current.Cherry!.DriverId}, {dpi}%");
+        var setTimer = Stopwatch.StartNew();
         if (!_topology.SetScale(current, dpi)) throw Failed($"Cherry 手机屏 #{current.Cherry!.DriverId} 设置 {dpi}% 缩放失败");
+        Log.Info($"[诊断] SetScale完成: {setTimer.Elapsed.TotalSeconds:0.1}s");
+        
+        var pollTimer = Stopwatch.StartNew();
         MonitorSnapshot? ReadDpi() => readSize() is { } m && m.Mode.DpiScalePercent == dpi ? m : null;
-        if (await PollAsync(ReadDpi, _timeout, ct).ConfigureAwait(false) is null) throw Failed($"未确认手机屏缩放为 {dpi}%");
+        if (await PollAsync(ReadDpi, _timeout, ct).ConfigureAwait(false) is null)
+        {
+            Log.Warn($"[诊断] Poll DPI超时: {pollTimer.Elapsed.TotalSeconds:0.1}s");
+            throw Failed($"未确认手机屏缩放为 {dpi}%");
+        }
+        Log.Info($"[诊断] Poll DPI成功: {pollTimer.Elapsed.TotalSeconds:0.1}s");
     }
 
     private (MonitorSnapshot Monitor, ScreenFit Fit, int Width)? Confirmed(uint id)

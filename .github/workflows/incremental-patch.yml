@@ -1,0 +1,108 @@
+name: Incremental Patch Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_commit:
+        description: 'Base commit SHA (e1ce70d)'
+        required: true
+        default: 'e1ce70d93d00d4d13696bb0d79c1d6db09a07612'
+      target_commit:
+        description: 'Target commit SHA (345cc8e)'
+        required: true
+        default: '345cc8efbae99a06e9cbbb273349ccd44cf3026b'
+
+jobs:
+  create-patch:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout target commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_commit }}
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.404'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build only changed assemblies
+        shell: pwsh
+        run: |
+          # Build only the projects that changed
+          dotnet build src/SnugWin.Windows/SnugWin.Windows.csproj -c Release --no-restore
+          dotnet build src/SnugWin.Core/SnugWin.Core.csproj -c Release --no-restore
+          dotnet build src/SnugWin.App/SnugWin.App.csproj -c Release --no-restore
+          dotnet build src/SnugWin/SnugWin.csproj -c Release --no-restore
+
+      - name: Create patch directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path patch
+          
+          # Copy only the changed DLLs/EXEs
+          Copy-Item "src/SnugWin.Windows/bin/Release/net10.0-windows/SnugWin.Windows.dll" patch/
+          Copy-Item "src/SnugWin.Core/bin/Release/net10.0/SnugWin.Core.dll" patch/
+          Copy-Item "src/SnugWin.App/bin/Release/net10.0-windows/SnugWin.App.dll" patch/
+          Copy-Item "src/SnugWin.App/bin/Release/net10.0-windows/SnugWin.App.exe" patch/
+
+      - name: Calculate checksums
+        shell: pwsh
+        run: |
+          cd patch
+          Get-ChildItem -File | ForEach-Object {
+            $hash = (Get-FileHash -Path $_.Name -Algorithm SHA256).Hash
+            "$hash  $($_.Name)" | Out-File -FilePath PATCH-SHA256.txt -Append -Encoding utf8
+          }
+          Get-Content PATCH-SHA256.txt
+
+      - name: Create patch manifest
+        shell: pwsh
+        run: |
+          $manifest = @"
+          # 增量更新包 Manifest
+          
+          ## 源版本
+          - Base: e1ce70d93d00d4d13696bb0d79c1d6db09a07612
+          - Target: 345cc8efbae99a06e9cbbb273349ccd44cf3026b
+          
+          ## 变更文件
+          - SnugWin.Windows.dll (诊断代码)
+          - SnugWin.Core.dll (依赖重建)
+          - SnugWin.App.dll (依赖重建)
+          - SnugWin.App.exe (依赖重建)
+          
+          ## 应用步骤
+          1. 确认当前版本为 e1ce70d (检查原README-TEST.txt)
+          2. 备份原有文件
+          3. 停止运行中的 SnugWin.App.exe
+          4. 覆盖上述4个文件到安装目录
+          5. 验证哈希（见PATCH-SHA256.txt）
+          6. 以管理员身份启动 SnugWin.App.exe
+          
+          ## 验证
+          ```powershell
+          Get-FileHash SnugWin.Windows.dll -Algorithm SHA256
+          # 对比PATCH-SHA256.txt中的哈希
+          ```
+          
+          ## 回滚
+          如需回滚，恢复备份的原文件即可。
+          
+          ## 注意
+          - 仅适用于从 e1ce70d 完整包升级到 345cc8e 诊断版本
+          - 保留所有原有配置和driver目录
+          - 不影响其他运行时文件
+          "@
+          
+          $manifest | Out-File -FilePath patch/PATCH-README.txt -Encoding utf8
+
+      - name: Upload patch package
+        uses: actions/upload-artifact@v4
+        with:
+          name: snugwin-patch-e1ce70d-to-345cc8e
+          path: patch/
+          retention-days: 30

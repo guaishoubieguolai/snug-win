@@ -28,9 +28,10 @@ internal sealed class DisplayOwnershipFixture : PhoneDisplayTopology, IVirtualDi
     public bool AcceptScale { get; set; } = true;
     public bool ApplyScale { get; set; } = true;
     public List<int> ScaleRequests { get; } = [];
+    public PhoneDisplayTopology? TopologyOverride { get; set; }
 
     public PhoneDisplayService Service(SnugPaths? paths = null) =>
-        new(this, paths, () => PipeUp, this, TimeSpan.FromMilliseconds(35));
+        new(this, paths, () => PipeUp, TopologyOverride ?? this, TimeSpan.FromMilliseconds(35));
 
     public CherryMonitor Plug(uint id)
     {
@@ -141,4 +142,35 @@ internal sealed class DisplayOwnershipFixture : PhoneDisplayTopology, IVirtualDi
 
     public Task RemoveAllAsync(CancellationToken ct = default) => throw new InvalidOperationException("RemoveAll is never safe");
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
+
+internal sealed class TestTopologyWithTransientGlitch : PhoneDisplayTopology
+{
+    private readonly DisplayOwnershipFixture _rig;
+    private readonly Func<List<MonitorSnapshot>> _activeProvider;
+
+    public TestTopologyWithTransientGlitch(DisplayOwnershipFixture rig, Func<List<MonitorSnapshot>> activeProvider)
+    {
+        _rig = rig;
+        _activeProvider = activeProvider;
+    }
+
+    public override CherryInventory Inspect() => _rig.Inspect();
+    public override IReadOnlyList<MonitorSnapshot> Active() => _activeProvider();
+    public override IReadOnlyList<uint> LegacyProfileIds() => _rig.LegacyProfileIds();
+    public override void RestoreCursorIfStranded() => _rig.RestoreCursorIfStranded();
+    public override string? Attach(CherryMonitor target, int width, int height) => _rig.Attach(target, width, height);
+    public override bool SetResolution(MonitorSnapshot current, int width, int height, double hz) => _rig.SetResolution(current, width, height, hz);
+    public override bool SetScale(MonitorSnapshot current, int percent) => _rig.SetScale(current, percent);
+}
+
+internal sealed class TestTopologyWithPermanentLoss : PhoneDisplayTopology
+{
+    public override CherryInventory Inspect() => new CherryInventory();
+    public override IReadOnlyList<MonitorSnapshot> Active() => Array.Empty<MonitorSnapshot>();
+    public override IReadOnlyList<uint> LegacyProfileIds() => Array.Empty<uint>();
+    public override void RestoreCursorIfStranded() { }
+    public override string? Attach(CherryMonitor target, int width, int height) => null;
+    public override bool SetResolution(MonitorSnapshot current, int width, int height, double hz) => false;
+    public override bool SetScale(MonitorSnapshot current, int percent) => false;
 }

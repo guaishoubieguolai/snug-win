@@ -1,0 +1,22 @@
+name: Upload Patch Artifact
+
+on:
+  push:
+    paths:
+      - 'snugwin-patch-*.zip'
+    branches:
+      - 'cursor/fix-display-topology-tolerance-ca74'
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Upload patch as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: snugwin-patch-e1ce70d-to-345cc8e
+          path: snugwin-patch-e1ce70d-to-345cc8e.zip
+          retention-days: 90

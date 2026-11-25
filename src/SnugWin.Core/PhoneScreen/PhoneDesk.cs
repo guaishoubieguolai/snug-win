@@ -1016,24 +1016,54 @@ public sealed class PhoneDesk
 
     private async Task<bool> SwitchWidthAsync(uint id, int width)
     {
-        if (_displays.WidthOf(id) == width) return true;
+        int? before = _displays.WidthOf(id);
+        if (before == width) return true;
+        
+        double started = _timeline.Now;
+        Log.Info($"[诊断] SwitchWidth开始: 显示器#{id}, 当前宽度={before}, 目标宽度={width}");
+        
         try
         {
             await _displays.SetWidthAsync(id, width);
+            double elapsed = _timeline.Now - started;
+            int? after = _displays.WidthOf(id);
+            Log.Info($"[诊断] SwitchWidth完成: {elapsed:0.1}s, 切换后宽度={after}");
             return true;
         }
         catch (PhoneScreenException ex)
         {
-            Log.Warn($"手机屏 #{id} 切换 {width} 宽失败：{ex.Message}");
+            double elapsed = _timeline.Now - started;
+            int? after = _displays.WidthOf(id);
+            Log.Warn($"[诊断] SwitchWidth失败: {elapsed:0.1}s, 当前宽度={after}, 错误={ex.Message}");
             return false;
         }
     }
 
     private async Task<RectD?> FillAsync(Placement p, uint id)
     {
-        if (!await SwitchWidthAsync(id, p.Width)) return null;
-        if (_displays.WindowAreaOf(id) is not { } area) return null;
-        if (await _windows.MoveAsync(p.Window.Key, area) is not { } got) return null;
+        double fillStarted = _timeline.Now;
+        int? widthBefore = _displays.WidthOf(id);
+        Log.Info($"[诊断] FillAsync开始: 窗口={p.Window.Label}(hwnd={p.Window.Key.Handle}), 目标宽度={p.Width}, 当前宽度={widthBefore}");
+        
+        if (!await SwitchWidthAsync(id, p.Width))
+        {
+            Log.Warn($"[诊断] FillAsync中止: SwitchWidth失败");
+            return null;
+        }
+        if (_displays.WindowAreaOf(id) is not { } area)
+        {
+            Log.Warn($"[诊断] FillAsync中止: 无法获取WindowArea");
+            return null;
+        }
+        
+        double beforeMove = _timeline.Now;
+        if (await _windows.MoveAsync(p.Window.Key, area) is not { } got)
+        {
+            Log.Warn($"[诊断] FillAsync中止: MoveAsync失败");
+            return null;
+        }
+        double afterMove = _timeline.Now;
+        Log.Info($"[诊断] MoveAsync耗时: {afterMove - beforeMove:0.1}s, 窗口实际={got.Short}, 目标区域={area.Short}");
 
         var bounds = _displays.BoundsOf(id) ?? area;
         if (!OriginOnScreen(got, bounds) && _displays.MainArea() is { } mainArea)
@@ -1073,11 +1103,22 @@ public sealed class PhoneDesk
         }
 
         bool placedAtOrigin = Math.Abs(got.MinX - area.MinX) < 2 && Math.Abs(got.MinY - area.MinY) < 2;
-        if (!placedAtOrigin || _displays.WidthOf(id) is not { } current) return got;
+        if (!placedAtOrigin || _displays.WidthOf(id) is not { } current)
+        {
+            double elapsed = _timeline.Now - fillStarted;
+            Log.Info($"[诊断] FillAsync完成: {elapsed:0.1}s, 未触发换宽(placedAtOrigin={placedAtOrigin})");
+            return got;
+        }
         int nextWidth = CurrentScreenFit.WidthToFit(got.Size, area.Size, current);
-        if (nextWidth <= current || nextWidth == p.Width) return got;
+        if (nextWidth <= current || nextWidth == p.Width)
+        {
+            double elapsed = _timeline.Now - fillStarted;
+            Log.Info($"[诊断] FillAsync完成: {elapsed:0.1}s, 宽度匹配(nextWidth={nextWidth})");
+            return got;
+        }
 
         Log.Info($"{p.Window.Label} 在 {current} 宽铺不满（实际 {got.Short}），换到 {nextWidth} 宽");
+        Log.Info($"[诊断] FillAsync递归: 当前宽度={current}, 窗口={got.Short}, 区域={area.Short}, 推导={nextWidth}");
         p.Width = nextWidth;
         return await FillAsync(p, id);
     }
