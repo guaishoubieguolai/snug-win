@@ -102,7 +102,7 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
 
     private IReadOnlyList<(uint StableId, bool IsPrimary)> SnapshotNonCherryDisplays() =>
         _topology.Active()
-            .Where(m => m.Cherry is null && (m.HasDedicatedTarget || m.IsPrimary))
+            .Where(m => m.Cherry is null && m.HasDedicatedTarget)
             .Select(m => (m.StableId, m.IsPrimary))
             .ToArray();
 
@@ -121,33 +121,52 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
 
     private void EnsureNonCherryIntact(IReadOnlyList<(uint StableId, bool IsPrimary)> baseline)
     {
-        if (baseline.Count == 0) return;
         var active = _topology.Active();
         var activeNonCherry = active.Where(m => m.Cherry is null).ToList();
-        var activeIds = activeNonCherry.Select(m => m.StableId).ToHashSet();
         
-        foreach (var (stableId, wasPrimary) in baseline)
+        // 检查1: 确保所有物理显示器（HasDedicatedTarget=true）仍然存在
+        if (baseline.Count > 0)
         {
-            if (!activeIds.Contains(stableId))
+            var activeIds = activeNonCherry.Select(m => m.StableId).ToHashSet();
+            foreach (var (stableId, wasPrimary) in baseline)
             {
-                // [诊断] 记录完整显示器身份信息用于StableId变化分析
-                var baselineInfo = string.Join(", ", baseline.Select(b => $"#{b.StableId}(Primary={b.IsPrimary})"));
-                var currentInfo = activeNonCherry.Count == 0 
-                    ? "EMPTY - 枚举返回0个非Cherry显示器"
-                    : string.Join(", ", activeNonCherry.Select(m => {
-                        var source = _topology.Active().FirstOrDefault(s => s.StableId == m.StableId);
-                        var targetPath = m.HasDedicatedTarget ? GetTargetPathForDiagnostic(m) : "N/A";
-                        return $"#{m.StableId}(Name={m.DeviceName},Primary={m.IsPrimary},Dedicated={m.HasDedicatedTarget},Luid={m.AdapterId.LowPart:X8}-{m.AdapterId.HighPart:X8},Src={m.SourceId},Path={targetPath})";
-                    }));
-                
-                Log.Warn($"[诊断] 检测到StableId #{stableId}(Primary={wasPrimary}) 在baseline中但current中丢失");
-                Log.Warn($"[诊断] Baseline非Cherry显示器数量: {baseline.Count}, IDs: {baselineInfo}");
-                Log.Warn($"[诊断] Current非Cherry显示器数量: {activeNonCherry.Count}, {currentInfo}");
-                
-                throw Failed(wasPrimary
-                    ? "建屏过程中原主显示器脱离活动桌面，已中止以保护桌面输出"
-                    : "建屏过程中原有非 Cherry 显示器脱离活动桌面，已中止", isSafetyAbort: true);
+                if (!activeIds.Contains(stableId))
+                {
+                    // [诊断] 记录完整显示器身份信息用于StableId变化分析
+                    var baselineInfo = string.Join(", ", baseline.Select(b => $"#{b.StableId}(Primary={b.IsPrimary})"));
+                    var currentInfo = activeNonCherry.Count == 0 
+                        ? "EMPTY - 枚举返回0个非Cherry显示器"
+                        : string.Join(", ", activeNonCherry.Select(m => {
+                            var targetPath = m.HasDedicatedTarget ? GetTargetPathForDiagnostic(m) : "N/A";
+                            return $"#{m.StableId}(Name={m.DeviceName},Primary={m.IsPrimary},Dedicated={m.HasDedicatedTarget},Luid={m.AdapterId.LowPart:X8}-{m.AdapterId.HighPart:X8},Src={m.SourceId},Path={targetPath})";
+                        }));
+                    
+                    Log.Warn($"[诊断] 检测到StableId #{stableId}(Primary={wasPrimary}) 在baseline中但current中丢失");
+                    Log.Warn($"[诊断] Baseline物理显示器数量: {baseline.Count}, IDs: {baselineInfo}");
+                    Log.Warn($"[诊断] Current非Cherry显示器数量: {activeNonCherry.Count}, {currentInfo}");
+                    
+                    throw Failed(wasPrimary
+                        ? "建屏过程中原主显示器脱离活动桌面，已中止以保护桌面输出"
+                        : "建屏过程中原有非 Cherry 显示器脱离活动桌面，已中止", isSafetyAbort: true);
+                }
             }
+        }
+        
+        // 检查2: 确保至少有一个主显示器存在（无论是物理还是临时）
+        bool hasPrimary = activeNonCherry.Any(m => m.IsPrimary);
+        if (!hasPrimary)
+        {
+            var currentInfo = activeNonCherry.Count == 0 
+                ? "EMPTY - 枚举返回0个非Cherry显示器"
+                : string.Join(", ", activeNonCherry.Select(m => {
+                    var targetPath = m.HasDedicatedTarget ? GetTargetPathForDiagnostic(m) : "N/A";
+                    return $"#{m.StableId}(Name={m.DeviceName},Primary={m.IsPrimary},Dedicated={m.HasDedicatedTarget},Path={targetPath})";
+                }));
+            
+            Log.Warn($"[诊断] 检测到所有非Cherry显示器都不是主显示器");
+            Log.Warn($"[诊断] Current非Cherry显示器数量: {activeNonCherry.Count}, {currentInfo}");
+            
+            throw Failed("建屏过程中主显示器属性丢失，已中止以保护桌面输出", isSafetyAbort: true);
         }
     }
     
