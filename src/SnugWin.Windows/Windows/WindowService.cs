@@ -14,6 +14,7 @@ namespace SnugWin.Windows.Windows;
 
 public sealed class WindowService : IWindowControl
 {
+    private static readonly ILog Log = LogProvider.GetCurrentClassLogger();
     private const int MoveRetries = 6;
     private const int RetryDelayMs = 120;
 
@@ -57,6 +58,7 @@ public sealed class WindowService : IWindowControl
             Win32.ShowWindow(hwnd, Win32.SW_RESTORE);
 
         RectD? lastBounds = null;
+        var moveTimer = Stopwatch.StartNew();
         for (int attempt = 0; attempt < MoveRetries; attempt++)
         {
             var (leftPad, topPad, rightPad, bottomPad) = GetShadowMargins(hwnd);
@@ -65,18 +67,27 @@ public sealed class WindowService : IWindowControl
             int w = (int)Math.Round(targetFrame.Width + leftPad + rightPad);
             int h = (int)Math.Round(targetFrame.Height + topPad + bottomPad);
 
+            var attemptStart = moveTimer.ElapsedMilliseconds;
             Win32.SetWindowPos(hwnd, IntPtr.Zero, x, y, w, h, Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
 
             await Task.Delay(RetryDelayMs).ConfigureAwait(false);
             if (TryGetVisibleBounds(hwnd, out var got))
             {
+                var attemptTime = moveTimer.ElapsedMilliseconds - attemptStart;
+                Log.Info($"[诊断] Move重试{attempt}: {attemptTime}ms, 目标={targetFrame.Short}, 实际={got.Short}");
                 if (got.Matches(targetFrame, tolerance: 4.0))
                     return got;
                 if (attempt >= 1 && lastBounds is { } prev && got.Matches(prev, tolerance: 1.5))
                     return got;
                 lastBounds = got;
             }
+            else
+            {
+                var attemptTime = moveTimer.ElapsedMilliseconds - attemptStart;
+                Log.Warn($"[诊断] Move重试{attempt}: {attemptTime}ms, TryGetVisibleBounds失败");
+            }
         }
+        Log.Warn($"[诊断] MoveAsync失败: {moveTimer.ElapsedMilliseconds}ms后仍未到位");
         return lastBounds;
     }
 

@@ -628,16 +628,31 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
     private async Task ApplyWidthAsync(CherryMonitor target, ScreenFit fit, int width, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+        var totalTimer = Stopwatch.StartNew();
         var (w, h) = fit.PixelSize(width);
         var current = _topology.Online(target) ?? throw Failed($"未找到独立的 Cherry 手机屏 #{target.DriverId}");
         bool Sized(MonitorSnapshot? m) => m?.Mode.Width == w && m.Mode.Height == h && Math.Abs(m.Mode.RefreshRate - 60.0) < 1.0;
         MonitorSnapshot? ReadSize() => _topology.Online(target) is { } m && Sized(m) ? m : null;
         if (!Sized(current))
         {
+            Log.Info($"[诊断] SetResolution开始: #{target.DriverId}, {w}x{h}@60Hz");
+            var setTimer = Stopwatch.StartNew();
             if (!_topology.SetResolution(current, w, h, 60)) throw Failed($"Cherry 手机屏 #{target.DriverId} 切换 {w}x{h} @ 60Hz 失败");
-            current = await PollAsync(ReadSize, _timeout, ct).ConfigureAwait(false) ?? throw Failed($"未确认手机屏已切换 {w}x{h} @ 60Hz");
+            Log.Info($"[诊断] SetResolution完成: {setTimer.Elapsed.TotalSeconds:0.1}s");
+            
+            var pollTimer = Stopwatch.StartNew();
+            current = await PollAsync(ReadSize, _timeout, ct).ConfigureAwait(false);
+            if (current is null)
+            {
+                Log.Warn($"[诊断] Poll分辨率超时: {pollTimer.Elapsed.TotalSeconds:0.1}s");
+                throw Failed($"未确认手机屏已切换 {w}x{h} @ 60Hz");
+            }
+            Log.Info($"[诊断] Poll分辨率成功: {pollTimer.Elapsed.TotalSeconds:0.1}s");
         }
+        
+        var scaleTimer = Stopwatch.StartNew();
         await ApplyScaleAsync(current, fit.TargetDpiPercent(width), ReadSize, ct).ConfigureAwait(false);
+        Log.Info($"[诊断] ApplyScale耗时: {scaleTimer.Elapsed.TotalSeconds:0.1}s, 总耗时: {totalTimer.Elapsed.TotalSeconds:0.1}s");
     }
 
     private async Task ApplyScaleAsync(MonitorSnapshot current, int requested, Func<MonitorSnapshot?> readSize, CancellationToken ct)
@@ -645,10 +660,25 @@ public sealed class PhoneDisplayService : IPhoneDisplays, IAsyncDisposable
         ct.ThrowIfCancellationRequested();
         int dpi = current.ResolveDpiScalePercent(requested) ?? throw Failed("无法确认手机屏支持的缩放档位");
         if (dpi != requested) Log.Info($"Cherry 手机屏 #{current.Cherry!.DriverId} 请求 {requested}% 缩放，最接近的支持档位为 {dpi}%");
-        if (current.Mode.DpiScalePercent == dpi) return;
+        if (current.Mode.DpiScalePercent == dpi)
+        {
+            Log.Info($"[诊断] ApplyScale跳过: DPI已是{dpi}%");
+            return;
+        }
+        
+        Log.Info($"[诊断] SetScale开始: #{current.Cherry!.DriverId}, {dpi}%");
+        var setTimer = Stopwatch.StartNew();
         if (!_topology.SetScale(current, dpi)) throw Failed($"Cherry 手机屏 #{current.Cherry!.DriverId} 设置 {dpi}% 缩放失败");
+        Log.Info($"[诊断] SetScale完成: {setTimer.Elapsed.TotalSeconds:0.1}s");
+        
+        var pollTimer = Stopwatch.StartNew();
         MonitorSnapshot? ReadDpi() => readSize() is { } m && m.Mode.DpiScalePercent == dpi ? m : null;
-        if (await PollAsync(ReadDpi, _timeout, ct).ConfigureAwait(false) is null) throw Failed($"未确认手机屏缩放为 {dpi}%");
+        if (await PollAsync(ReadDpi, _timeout, ct).ConfigureAwait(false) is null)
+        {
+            Log.Warn($"[诊断] Poll DPI超时: {pollTimer.Elapsed.TotalSeconds:0.1}s");
+            throw Failed($"未确认手机屏缩放为 {dpi}%");
+        }
+        Log.Info($"[诊断] Poll DPI成功: {pollTimer.Elapsed.TotalSeconds:0.1}s");
     }
 
     private (MonitorSnapshot Monitor, ScreenFit Fit, int Width)? Confirmed(uint id)
